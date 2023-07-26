@@ -52,12 +52,12 @@ hooting.df <- hooting.df %>%
 ```
 
 ## Define Data
-Create separate df's for site level data and survey level data and standardize the predictor values.
+Create separate data frames for site level data and survey level data and standardize the predictor values.
 ```{r}
 # SURVEYS:
 # define the primary seasons (min to max)
 yrs <- min(hooting.df$survey_year):max(hooting.df$survey_year)
-yrs  # this includes years when no sampling occurred, that is what we want
+yrs  # this includes years when no sampling occurred
 
 # define total length of data period
 K <- length(yrs)
@@ -71,21 +71,17 @@ I # 53 sites
 
 # define the max number of replicate surveys
 J <- max(hooting.df$survey_number)
-J # 6 is the max number of replicate surveys (probably Bright Angel PAC, which gets surveyed very frequently each year)
+J # 6 is the max number of replicate surveys
 
 # define the number of surveys conducted
 T <- nrow(hooting.df)
 T # 306 surveys conducted
 
 # add site (pac) number as a new column to the hooting data frame
-hooting.df$siteid <- as.numeric(as.factor(hooting.df$pac_surveyed)) 
-# JAGS will expect the sites to be numbered
-
-# view the data to make sure those things worked
-head(hooting.df)
+hooting.df$siteid <- as.numeric(as.factor(hooting.df$pac_surveyed)) # JAGS will expect the sites to be numbered
 
 
-# DEFINE SITE LEVEL DATA SURVEY LEVEL DATA
+# MAKE COVARIATE DATAFRAMES
 # extract site level covariates of interest:
 X <- hooting.df %>% # define df  
   dplyr::group_by(siteid) %>% # group by siteid
@@ -107,7 +103,7 @@ XJ <- hooting.df %>%
 XJ[,1:2] <- apply( XJ[,1:2], MARGIN = 2, FUN = scale )
 
 # view
-head(XJ)
+head(XJ);dim(XJ)
 ```
 
 ## Define MCMC Sampling Settings
@@ -117,316 +113,8 @@ nb <- 10000 # burning = the chains we get rid of at the beginning of an mcmc run
 nc <- 5 # chains = the number of chains, default is 4 I believe
 ```
 
-Logit(psi)[yr=1] = int + random intercept[yr = 1] 
-plot(puts it back on the real scale plogis aka inverse logit(model results$mean$int.psi/ modelresults$mean$eps.K))
-
-Summary of my models:
-Model 1 - Full additive model, random effect of year only on detection sub model
-
-Model 2 - Move all of the variables from colonization on to the persistence model, random effect of year only on detection model
-
-Model 3 - Collapse colonization and persistence into the occupancy model and only have an occupancy model and detection model. Add random effect of year to both sub models. 
   
-  
-## Write Model 1
-Dynamic occupancy model
-```{r}
-sink("dm1.txt") # sink diverts R output to a connection, in this case a text file
-cat("model{ 
-
-# PRIORS
-########
-
-  # ecological model:    
-      # psi = occupancy in year 1
-      psi1 ~ dbeta(4, 4) 
-# NOTE: using beta instead of binomial here because binomial models the number of successes, but beta models the probability of success. alternative prior from a uniform distribution, dunif(0, 1) = uniform distribution constrained between 0 and 1
-      # phi = persistence probability
-      int.phi <- log(mean.phi / (1 - mean.phi)) 
-      mean.phi ~ dbeta(4, 4)
-      # gamma = colonization probability
-      int.gam <- log( mean.gam / (1 - mean.gam)) 
-      mean.gam ~ dbeta(4, 4)
-  # for detection model:
-      # p = detection
-      int.p <- log( mean.p / (1 - mean.p))
-      mean.p ~ dbeta(4, 4)
-  # random year intercept for ecological model and for detection model
-      for (k in 1:K){ 
-      eps.p[ k ] ~ dnorm( 0, prec.p ) T(-7, 7)  # for detection model
-      }
-      # associated precision of random intercepts:     
-      prec.p <- 1 / ( sigma.p * sigma.p )
-      sigma.p ~ dt( 0, 2.5, 7 ) T( 0, )
-  # priors for beta predictors:
-      for( q in 1:2 ){ # loop over number of predictors
-        beta.phi[ q ] ~ dnorm( 0, 0.1 ) # prior for persistence predictors
-      }
-      for( q in 1:3 ){ # loop over number of predictors
-        beta.gam[ q ] ~ dnorm( 0, 0.1 ) # prior for colonization predictors
-      } # Q
-      for( q in 1:2 ){ # loop over number of predictors
-        beta.p[ q ] ~ dnorm( 0, 0.1 ) # prior for detection predictors
-      } # Q
-     
-# MODEL
-        for( i in 1:I ){  # loop over sites
-          # estimating psi[,1]: year 1
-          z[ i, 1 ] ~ dbern( psi[ i, 1 ] ) # bernouli dist. of occupancy/non-occupancy
-          psi[ i, 1 ] <- psi1
-     
-          for ( k in 2:K ) { # loop over years
-              # occupancy state:
-              z[ i, k ] ~ dbern( psi[ i, k ] ) 
-              # probability of occupancy starts on year 2
-              psi[ i, k ] <- z[ i, k-1 ] * phi[ i, k-1 ] + 
-                        ( 1 - z[ i, k-1 ] ) * gam[ i, k-1 ] 
-              # model for persistence probability:
-              logit( phi[ i, k-1 ] ) <- int.phi + 
-                  # fixed predictors:
-                  beta.phi[ 1 ] * X[ i, 1 ] + # coleogyne
-                  beta.phi[ 2 ] * X[ i, 5 ] # people
-              # model for colonization probability:
-              logit( gam[ i, k-1 ] ) <- int.gam + 
-                  beta.gam[ 1 ] * X[ i, 4 ] + # geometry
-                  beta.gam[ 2 ] * X[ i, 3 ] + # mshrub
-                  beta.gam[ 3 ] * X[ i, 2 ] # pjcon
-          } # K years
-        } # I sites
-        
-      # detection model:
-          for( t in 1:T ){  # loop over all replicates (T is the number of rows)
-              logit( p[ t ] ) <- int.p +
-                  # random effects:
-                  eps.p[ yearid[t] ] +
-                  # fixed predictors
-                  beta.p[ 1 ] * pac_area[ t ] + # area
-                  beta.p[ 2 ] * julian_date[ t ] #julian day 
-        # linking both model outputs to observations
-        y_obs[ t ] ~ dbern( z[ siteid[t], yearid[t] ] * p[ t ] ) 
-        
-# Model Validation
-        # estimated detections from model:
-        yhat[ t ] ~ dbern( z[ siteid[t], yearid[t] ] * p[ t ] ) 
-
-        # Bernoulli likelihood of observations (for logistic regression) # from the data
-        lik_yobs[ t ] <- ( ( psi[ siteid[t], yearid[t] ] * p[ t ] )^y_obs[ t ] ) *
-              ( ( 1 - psi[ siteid[t], yearid[t] ] * p[ t ] )^( 1 - y_obs[ t ] ) )
-        # likelihood of estimated detections:# from the model only
-        lik_yhat[ t ] <- ( ( psi[ siteid[t], yearid[t] ]* p[ t ] )^yhat[ t ] ) *
-            ( ( 1 - psi[ siteid[t], yearid[t] ] * p[ t ] )^( 1 - yhat[ t ] ) )
-      } # t
-
-     } # model close
-     
-     ", fill = TRUE )
-
-sink() # sends it to text
-```
-
-## Run Model 1 
-```{r}
-# name the model
-modelname <- "dm1.txt"
-
-# define parameters monitored:
-# only keep those relevant for model comparisons
-# jags will estimate all of them, but these are the ones I want to keep track of
-params <- c('int.phi', # intercept for persistence model 
-            'int.gam', # intercept for colonization model
-            'int.p', # intercept for detection
-            'beta.phi', # fixed coefficients for persistence
-            'beta.gam', # fixed coefficients for colonization model
-            'beta.p', # coefs for detection
-            'eps.p', # random intercept for year in detection model
-            'z', # estimated occupancy state
-            'psi',
-            'phi', # slope for persistence
-            'gam', # slope for colonization
-            'p', # slope for detection
-            'lik_yobs', # likelihood for each occupancy observation (model validation)
-            'lik_yhat', # likelihood for occupancy observations predicted by the model (model validation)
-            'yhat') # estimated occurrence from model (model validation)
-
-# create initial values for the model coefficients
-zst <- matrix(data = 1, nrow = I, ncol = K ) # tell the model to start at occupied state
-# pst <- array(data = 1, dim = c(I,K,J) )
-inits <- function(){ list( beta.psi = rnorm( 5 ),
-                           beta.p = rnorm( 2 ), 
-                           z = zst)}
-
-# give it the data:
-str(win.data <- list(y_obs = XJ$y_obs, # observed occupancy for each species
-                       K = K , J = J, I = I, T = T, # how many yrs/surveys/sites/rows in the long df
-                     
-                       # site level predictors:
-                       X = as.matrix(X[,1:5]), # X are predictors (only the first 5) 
-
-                       # survey level predictors:
-                       siteid = XJ$siteid,
-                       yearid = XJ$yearid,
-                       surveyid = XJ$surveyid,
-                       julian_date = XJ$julian_date,
-                       pac_area = XJ$pac_area))                
-
-# call JAGS and summarize posteriors:
-m1 <-  autojags( win.data, inits = inits, params, modelname,
-                 n.chains = nc, n.thin = nt, n.burnin = nb,
-                 iter.increment = 20000, max.iter = 500000, 
-                 Rhat.limit = 1.02, # a measure of what you consider "converged"
-                 save.all.iter = FALSE, parallel = TRUE )
-
-print(m1, dig = 2)
-```
-why aren't we interested in psi, why is it z instead? i thought z was just year 1?
-
-## Write and Define Model 2 
-Added random year intercept to detection model.
-```{r}
-sink( "dm2.txt" )
-cat( "
-     model{
-     
-      # priors
-      # for occupancy model:    
-      psi1 ~ dbeta( 4, 4 ) #dunif( 0, 1 ) #alternative prior
-      
-      # define intercepts for ecological models as mean probs:
-      int.phi <- log( mean.phi / ( 1 - mean.phi ) )
-      mean.phi ~ dbeta( 4, 4 )  # mean persistence prob
-      int.gam <- log( mean.gam / ( 1 - mean.gam ) )
-      mean.gam ~ dbeta( 4, 4 )  # mean colonization prob
-      
-      # for detection
-      int.p <- log( mean.p / ( 1 - mean.p ) )
-      mean.p ~ dbeta( 4, 4 )  #mean detection prob
-      
-      # random year intercepts
-      for ( k in 1:K ){ 
-        eps.p[ k ] ~ dnorm( 0, prec.p ) T(-7, 7)
-      } # K
-      
-      # associated precision of random  intercepts:
-      prec.p <- 1 / ( sigma.p * sigma.p )
-      sigma.p ~ dt( 0, 2.5, 7 ) T( 0, )
-      
-      # priors for beta predictors:
-      for( q in 1:5 ){ #loop over number of predictors
-        beta.phi[ q ] ~ dnorm( 0, 0.1 ) #prior for persistence predictors
-      }
-      for( q in 1:2 ){ #loop over number of predictors
-        beta.p[ q ] ~ dnorm( 0, 0.1 ) #prior for detection predictors
-      } #Q
-     
-      # ecological model for occupancy:
-        for( i in 1:I ){  # loop over sites
-          # estimating psi[,1]:
-          z[ i, 1 ] ~ dbern( psi[ i, 1 ] ) 
-          psi[ i, 1 ] <- psi1
-     
-          for ( k in 2:K ) { #loop over years
-            # occupancy state:
-            z[ i, k ] ~ dbern( psi[ i, k ] ) 
-            # probability of occupancy starts on year 2
-            psi[ i, k ] <- z[ i, k-1 ] * phi[ i, k-1 ] + 
-                        ( 1 - z[ i, k-1 ] ) * gam[ i, k-1 ] 
-              # model for persistence probability:
-              logit( phi[ i, k-1 ] ) <- int.phi + 
-                  #fixed predictors:
-                  beta.phi[ 1 ] * X[ i, 1 ] + # coleogyne
-                  beta.phi[ 2 ] * X[ i, 5 ] + # people
-                  beta.phi[ 3 ] * X[ i, 4 ] + # geometry
-                  beta.phi[ 4 ] * X[ i, 3 ] + # mshrub
-                  beta.phi[ 5 ] * X[ i, 2 ] # pjcon
-              # model for colonization probability:
-              logit( gam[ i, k-1 ] ) <- int.gam 
-          } # K years
-        } # I sites
-        
-      # observation model:
-      for( t in 1:T ){  #loop over all replicates
-        logit( p[ t ] ) <- int.p +
-            #random intercept for year
-            eps.p[ yearid[t] ] +
-            # fixed predictors
-            beta.p[ 1 ] * pac_area[ t ] + # area
-            beta.p[ 2 ] * julian_date[ t ] # julian day 
-        # linking both model outputs to observations
-        y_obs[ t ] ~ dbern( z[ siteid[t], yearid[t] ] * p[ t ] ) 
-             
-        # estimated detections from model:
-        yhat[ t ] ~ dbern( z[ siteid[t], yearid[t] ] * p[ t ] ) 
-        # Bernoulli likelihood of observations (for logistic regression)
-        lik_yobs[ t ] <- ( ( psi[ siteid[t], yearid[t] ] * p[ t ] )^y_obs[ t ] ) *
-              ( ( 1 - psi[ siteid[t], yearid[t] ] * p[ t ] )^( 1 - y_obs[ t ] ) )
-        # likelihood of estimated detections:
-        lik_yhat[ t ] <- ( ( psi[ siteid[t], yearid[t] ]* p[ t ] )^yhat[ t ] ) *
-            ( ( 1 - psi[ siteid[t], yearid[t] ] * p[ t ] )^( 1 - yhat[ t ] ) )
-      } # t
-     } # model close
-     
-     ", fill = TRUE )
-
-sink()
-```
-
-## Run Model 2
-```{r}
-modelname <- "dm2.txt"
-
-# parameters monitored only keep those relevant for model comparisons
-params <- c('int.phi' # intercept for persistence model 
-             , 'int.gam' # intercept for colonization model
-             , 'int.p' # intercept for detection model
-             , 'beta.phi' # fixed coefficients for persistence
-             , 'beta.p' # fixed coefficients for detection
-             , 'eps.p' # random intercept for year for detection model
-             , 'sigma.p' # variance for random intercept
-             , 'z' # estimated occupancy state
-             , 'psi'
-             , 'phi' # estimated persistence
-             , 'gam' # estimated colonization
-             , 'p' # estimated detection
-             , 'lik_yobs' #likelihood for each occupancy observation
-             , 'lik_yhat' #likelihood for occupancy observations predicted by the model
-             , 'yhat' #estimated occurrence from model
-             )
-
-# create initial values for the model coefficients
-zst <- matrix(data = 1, nrow = I, ncol = K)
-
-# pst <- array(data = 1, dim = c(I,K,J))
-
-# create initial values to start the algorithm
-inits <- function(){list(beta.phi = rnorm(5),
-                         beta.p = rnorm(2), 
-                         # p = pst,
-                         z = zst)
-  }
-
-# combine data into object:
-str( win.data <- list( y_obs = XJ$y_obs, #observed occupancy for each species
-                       K = K , J = J, I = I, T = T
-                       # site level predictors
-                       ,X = as.matrix(X[,1:5])
-                       # survey level predictors
-                       ,siteid = XJ$siteid
-                       ,yearid = XJ$yearid
-                       ,surveyid = XJ$surveyid
-                       ,julian_date = XJ$julian_date
-                       ,pac_area = XJ$pac_area))                
-
-# call JAGS and summarize posteriors:
-m2 <- autojags(win.data, inits = inits, params, modelname,
-               n.chains = nc, n.thin = nt, n.burnin = nb,
-               iter.increment = 20000, max.iter = 500000, 
-               Rhat.limit = 1.02,
-               save.all.iter = FALSE, parallel = TRUE) 
-
-print(m2, dig = 2)
-```
-
-## Write Model 3
+## Write Model
 Multi-season occupancy model (different from dynamic because it excludes extinction and colonization parameters).
 ```{r}
 sink( "dm3.txt" )
@@ -551,9 +239,10 @@ sink()
 
 ## Run Model 3
 ```{r}
+# name the model
 modelname <- "dm3.txt"
-# parameters monitored - only keep those relevant for model comparisons
 
+# parameters monitored - only keep those relevant for model comparisons
 params <- c('int.psi' # intercept for occupancy model
             ,'int.p' # intercept for detection
             ,'beta.psi' # fixed coefficients for occupancy
@@ -562,8 +251,8 @@ params <- c('int.psi' # intercept for occupancy model
             ,'sigma.k' # standard deviation associated with random year for occupancy
             ,'eps.p' # random year intercept for detection 
             ,'sigma.p' # standard deviation associated with random year for detection
-            ,'eps.i'
-            ,'sigma.i'
+            ,'eps.i' # random site intercept for occupancy
+            ,'sigma.i' # standard deviation associated with detection
             ,'z' # estimated occupancy state
             ,'psi' # probability of occupancy
             ,'p' # probability of detection
@@ -592,15 +281,14 @@ str( win.data <- list( y_obs = XJ$y_obs, # observed occupancy for each species
                        julian_date = XJ$julian_date,
                        pac_area = XJ$pac_area))                
 
-#call JAGS and summarize posteriors:
+# call JAGS and summarize posteriors:
 m3 <-  autojags( win.data, inits = inits, params, modelname,
                  n.chains = nc, n.thin = nt, n.burnin = nb,
                  iter.increment = 20000, max.iter = 500000, 
-                 Rhat.limit = 1.02, # rhat is metric of convergence, it should be verrrrry close to 1
+                 Rhat.limit = 1.02, 
                  save.all.iter = FALSE, parallel = TRUE ) 
 
 print(m3, dig = 2)
-# QUESTION: how can I have values greater than 1 here? Isn't this interpretable as occupancy probability and detection probability? 
 
 # posterior predictive plot check for model fit
 # pp.check(m3, observed = 'yhat', simulated = 'lik_yhat')
